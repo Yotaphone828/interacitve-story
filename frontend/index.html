@@ -1,0 +1,851 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>互动小说游戏</title>
+  <link rel="stylesheet" href="styles/main.css">
+</head>
+<body>
+  <h1>互动小说游戏</h1>
+
+  <!-- 章节输入区域 -->
+  <div id="chapterSection" class="section active">
+    <h2>请输入小说章节内容</h2>
+    <div>
+      <label for="storySelect">选择已有故事：</label>
+      <select id="storySelect">
+        <option value="">-- 请选择故事 --</option>
+      </select>
+    </div>
+    <textarea id="chapterText" rows="10" cols="80" placeholder="故事内容将显示在这里，您也可以直接输入新故事"></textarea><br>
+    <button id="startGameBtn">开始游戏</button>
+  </div>
+
+  <!-- 角色选择区域 -->
+  <div id="characterSection" class="section">
+    <h2>请选择你的角色</h2>
+    <div id="characterList"></div>
+    <button id="selectCharacterBtn">确定选择</button>
+  </div>
+
+  <!-- 关卡游戏区域 -->
+  <div id="gameSection" class="section">
+    <h2 id="levelTitle"></h2>
+    <p id="levelDescription"></p>
+    <div id="imageContainer">
+      <img id="levelImage" src="" alt="背景图片">
+      <!-- 加载动画遮罩 -->
+      <div id="imageSpinner">
+         <span>加载中...</span>
+      </div>
+    </div><br>
+    <p><strong>AI (<span id="aiRole"></span>)：</strong> <span id="aiDialogue">加载中...</span></p>
+    <audio id="responseAudio"></audio>
+
+    <h3>请输入你的回应</h3>
+    <div class="response-container">
+      <button id="startVoiceBtn" title="开始语音输入">🎤</button>
+      <input type="text" id="userResponse" disabled>
+      <button id="submitResponseBtn" disabled>
+        <span class="button-text">提交回应</span>
+        <span class="loading-spinner">评估中...</span>
+      </button>
+    </div>
+
+    <p id="evaluationFeedback"></p>
+
+    <!-- 添加提示区域 -->
+    <div class="hints-section">
+        <div class="hints-header" onclick="toggleHints()">
+            <h3>💡 关卡提示</h3>
+            <span class="toggle-icon">▼</span>
+        </div>
+        <div id="hintsContent" class="hints-content">
+            <!-- 提示内容将通过 JavaScript 动态添加 -->
+        </div>
+    </div>
+  </div>
+
+  <!-- 聊天记录区域 -->
+  <div id="chatHistorySection" class="section">
+    <h2>聊天记录</h2>
+    <div id="chatHistory" class="chat"></div>
+  </div>
+
+  <!-- 调试日志区域 -->
+  <div id="debugPanel" class="section">
+    <h2>
+      调试日志
+      <div class="controls">
+        <button class="debug-toggle" id="toggleDebug">_</button>
+      </div>
+    </h2>
+    <pre id="debugOutput"></pre>
+    <div class="resize-handle right"></div>
+    <div class="resize-handle bottom"></div>
+    <div class="resize-handle bottom-right"></div>
+  </div>
+
+  <script>
+    let sessionId = null;
+    let selectedCharacterIndex = null;
+
+    // 启动 SSE 调试日志流，将接收到的调试日志显示在 debugOutput 区域
+    const eventSource = new EventSource("/debug_stream");
+
+    // 设置一个全局变量，用于保存当前活跃的请求日志块
+    let currentLogBlock = null;
+
+    // 添加调试面板控制功能
+    document.getElementById('toggleDebug').addEventListener('click', function() {
+      const debugPanel = document.getElementById('debugPanel');
+      const isMinimized = debugPanel.classList.toggle('minimized');
+      this.textContent = isMinimized ? '□' : '_';
+    });
+
+    // 修改调试日志处理函数
+    eventSource.onmessage = function(event) {
+      const debugOutput = document.getElementById("debugOutput");
+      try {
+        const logData = JSON.parse(event.data);
+        const logEntry = document.createElement("div");
+        
+        const now = new Date();
+        const timestamp = now.toLocaleTimeString('zh-CN', { 
+          hour12: false,
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          fractionalSecondDigits: 3
+        });
+        
+        // 优化日志显示格式
+        let logContent = "";
+        if (logData.type === "intermediate" || logData.type === "answer") {
+          const lastLog = debugOutput.lastElementChild;
+          if (lastLog && lastLog.getAttribute("data-type") === logData.type) {
+            debugOutput.removeChild(lastLog);
+          }
+          logContent = `${logData.type === "intermediate" ? "推理" : "回答"}: ${logData.log}`;
+        } else {
+          logContent = logData.log;
+        }
+        
+        logEntry.innerHTML = `<span style="color: #888">[${timestamp}]</span> ${logContent}`;
+        logEntry.setAttribute("data-type", logData.type);
+        
+        debugOutput.appendChild(logEntry);
+        debugOutput.scrollTop = debugOutput.scrollHeight;
+
+        // 限制日志数量，保持性能
+        while (debugOutput.children.length > 100) {
+          debugOutput.removeChild(debugOutput.firstChild);
+        }
+      } catch (e) {
+        console.error("Error parsing debug log:", e);
+      }
+    };
+
+    // 页面加载时获取故事列表并填充下拉菜单
+    async function loadStoryList() {
+      try {
+        const response = await fetch("/list_stories");
+        const stories = await response.json();
+        const select = document.getElementById("storySelect");
+        select.innerHTML = '<option value="">-- 请选择故事 --</option>';
+        
+        stories.forEach((story, index) => {
+          const option = document.createElement("option");
+          option.value = story.id;
+          option.textContent = `${story.title} - ${story.author} (${story.generated ? "已生成" : "未生成"}) | ${story.excerpt}`;
+          select.appendChild(option);
+        });
+      } catch (err) {
+        console.error("加载已有故事失败", err);
+      }
+    }
+    
+    // 页面加载时初始化故事列表
+    window.addEventListener("load", loadStoryList);
+    
+    // 当选择故事时更新文本框内容
+    document.getElementById("storySelect").addEventListener("change", async function() {
+      const selectedId = this.value;
+      if (!selectedId) {
+        document.getElementById("chapterText").value = "";
+        return;
+      }
+      
+      try {
+        const response = await fetch("/list_stories");
+        const stories = await response.json();
+        const selectedStory = stories.find(s => s.id === Number(selectedId));
+        if (selectedStory) {
+          document.getElementById("chapterText").value = selectedStory.content;
+        }
+      } catch (err) {
+        console.error("加载故事失败", err);
+      }
+    });
+
+    // 添加显示/隐藏section的函数
+    function showSection(sectionId) {
+        document.querySelectorAll('.section').forEach(section => {
+            section.classList.remove('active');
+        });
+        document.getElementById(sectionId).classList.add('active');
+    }
+
+    document.getElementById("startGameBtn").addEventListener("click", async () => {
+      const chapterText = document.getElementById("chapterText").value.trim();
+      if (!chapterText) {
+        alert("请输入章节内容！");
+        return;
+      }
+      const res = await fetch("/create_game", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chapter_text: chapterText })
+      });
+      const data = await res.json();
+      if (data.error) {
+        alert(data.error);
+        return;
+      }
+      sessionId = data.session_id;
+      // 显示剧情概述图片及角色列表
+      showSection('characterSection');
+      displayCharacters(data.characters);
+      updateChat(`系统：${data.message}`);
+    });
+
+    function displayCharacters(characters) {
+      const listDiv = document.getElementById("characterList");
+      listDiv.innerHTML = "";
+      characters.forEach((char, index) => {
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = "character";
+        radio.value = index;
+        if (index === 0) radio.checked = true;
+        const label = document.createElement("label");
+        label.innerText = `${char.name} - ${char.description}`;
+        const br = document.createElement("br");
+        listDiv.appendChild(radio);
+        listDiv.appendChild(label);
+        listDiv.appendChild(br);
+      });
+    }
+
+    document.getElementById("selectCharacterBtn").addEventListener("click", async () => {
+      const radios = document.getElementsByName("character");
+      let index = 0;
+      for (const radio of radios) {
+        if (radio.checked) {
+          index = parseInt(radio.value);
+          break;
+        }
+      }
+      const res = await fetch("/select_character", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId, character_index: index })
+      });
+      const data = await res.json();
+      if (data.error) {
+        alert(data.error);
+        return;
+      }
+      updateChat(`系统：${data.message}`);
+      showSection('gameSection');
+      loadLevel();
+    });
+
+    async function loadLevel() {
+      const levelImage = document.getElementById("levelImage");
+      const imageSpinner = document.getElementById("imageSpinner");
+      const aiDialogueElem = document.getElementById("aiDialogue");
+      
+      // 确保显示加载动画
+      imageSpinner.style.display = "flex";
+      levelImage.style.display = "none";
+      
+      try {
+          const res = await fetch("/get_level", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ session_id: sessionId })
+          });
+          const data = await res.json();
+          
+          // 更新关卡信息
+          document.getElementById("levelTitle").innerText = "关卡 " + data.level_number;
+          document.getElementById("levelDescription").innerText = data.description;
+          document.getElementById("aiRole").innerText = data.ai_role;
+  
+          // 处理图片URL
+          let imgUrl = "";
+          if (typeof data.level_image === "string") {
+              imgUrl = data.level_image;
+          } else if (typeof data.level_image === "object" && data.level_image.url) {
+              imgUrl = data.level_image.url;
+          }
+  
+          // 如果已经有有效的图片URL
+          if (imgUrl.startsWith("http")) {
+              await loadImageWithRetry(imgUrl);
+          } else {
+              // 开始轮询等待图片生成
+              pollForImage(sessionId);
+          }
+  
+          // 清空 AI 对话区域，随后通过流式接口实时更新
+          aiDialogueElem.innerText = "";
+          // 启动 EventSource 监听流式 AI 对话
+          const dialogueSource = new EventSource("/stream_level_dialogue?session_id=" + sessionId);
+          let currentAIResponse = "";  // 用于累积当前的 AI 回应
+          let isFirstToken = true;  // 用于标记是否是第一个 token
+          dialogueSource.onmessage = function(event) {
+            // 第一个 token 时清空 AI 对话区域
+            if (isFirstToken) {
+              aiDialogueElem.innerText = "";
+              isFirstToken = false;
+            }
+            // event.data 返回当前 token
+            aiDialogueElem.innerText += event.data;
+            currentAIResponse += event.data;
+          };
+  
+          dialogueSource.onerror = async function(err) {
+            console.error("Dialogue stream error:", err);
+            dialogueSource.close();
+            // 当对话完成时
+            if (currentAIResponse.trim()) {
+              // 更新聊天记录
+              updateChat(`AI (${data.ai_role}): ${currentAIResponse}`);
+              try {
+                await fetch("/update_chat_history", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ 
+                    session_id: sessionId, 
+                    message: `AI (${data.ai_role}): ${currentAIResponse}`
+                  })
+                });
+  
+                // 转换文本为语音并播放
+                const ttsResponse = await fetch("/text_to_speech", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ text: currentAIResponse })
+                });
+                
+                if (ttsResponse.ok) {
+                  const audioUrl = await ttsResponse.text();
+                  console.log("收到的音频数据:", audioUrl.substring(0, 100) + "..."); // 打印前100个字符
+  
+                  if (audioUrl && audioUrl !== "语音输出失败") {
+                      const audio = document.getElementById("responseAudio");
+                      audio.src = audioUrl;
+                      try {
+                          // 确保音频元素已经加载
+                          audio.load();
+                          // 添加加载完成事件监听器
+                          audio.oncanplay = async () => {
+                              try {
+                                  console.log("音频已加载，开始播放");
+                                  await audio.play();
+                                  console.log("音频开始播放");
+                              } catch (playError) {
+                                  console.error("播放音频失败:", playError);
+                              }
+                          };
+                          audio.onerror = (e) => {
+                              console.error("音频加载失败:", e);
+                          };
+                      } catch (playError) {
+                          console.error("播放音频失败:", playError);
+                      }
+                  } else {
+                      console.error("无效的音频数据:", audioUrl);
+                  }
+                }
+              } catch (error) {
+                console.error("处理 AI 响应时出错:", error);
+              }
+            }
+          };
+  
+          // 启用输入框和提交按钮
+          document.getElementById("userResponse").disabled = false;
+          document.getElementById("submitResponseBtn").disabled = false;
+
+          // 添加提示内容
+          const hintsContent = document.getElementById('hintsContent');
+          hintsContent.innerHTML = ''; // 清空现有提示
+          if (data.hints && data.hints.length > 0) {
+              data.hints.forEach(hint => {
+                  const hintDiv = document.createElement('div');
+                  hintDiv.className = 'hint-item';
+                  hintDiv.textContent = hint;
+                  hintsContent.appendChild(hintDiv);
+              });
+          } else {
+              const noHintDiv = document.createElement('div');
+              noHintDiv.className = 'hint-item';
+              noHintDiv.textContent = '当前关卡暂无提示...';
+              hintsContent.appendChild(noHintDiv);
+          }
+      } catch (err) {
+          console.error("加载关卡失败:", err);
+          imageSpinner.style.display = "none";
+          levelImage.src = "https://placehold.co/600x400?text=Load+Failed";
+          levelImage.style.display = "block";
+      }
+  }
+  
+  // 新增：带重试的图片加载函数
+  async function loadImageWithRetry(imgUrl, maxRetries = 3) {
+    const levelImage = document.getElementById("levelImage");
+    const imageSpinner = document.getElementById("imageSpinner");
+    
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            await new Promise((resolve, reject) => {
+                const timeoutId = setTimeout(() => {
+                    reject(new Error("Image load timeout"));
+                }, 10000); // 10秒超时
+                
+                levelImage.onload = () => {
+                    clearTimeout(timeoutId);
+                    imageSpinner.style.display = "none";
+                    levelImage.style.display = "block";
+                    resolve();
+                };
+                
+                levelImage.onerror = () => {
+                    clearTimeout(timeoutId);
+                    reject(new Error(`Failed to load image: ${imgUrl}`));
+                };
+                
+                levelImage.src = imgUrl;
+            });
+            return;
+        } catch (err) {
+            console.error(`图片加载失败，尝试 ${i + 1}/${maxRetries}:`, err);
+            if (i < maxRetries - 1) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+        }
+    }
+    
+    console.error("图片加载失败，使用占位图");
+    levelImage.src = "https://placehold.co/600x400?text=Load+Failed";
+    imageSpinner.style.display = "none";
+    levelImage.style.display = "block";
+}
+
+  async function pollForImage(sessionId, maxAttempts = 10) {
+      const levelImage = document.getElementById("levelImage");
+      const imageSpinner = document.getElementById("imageSpinner");
+      let attempts = 0;
+      
+      const pollInterval = setInterval(async () => {
+          attempts++;
+          if (attempts > maxAttempts) {
+              clearInterval(pollInterval);
+              imageSpinner.style.display = "none";
+              levelImage.src = "https://placehold.co/600x400?text=Generation+Timeout";
+              levelImage.style.display = "block";
+              return;
+          }
+          
+          try {
+              const res = await fetch("/get_level", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ session_id: sessionId })
+              });
+              const data = await res.json();
+              
+              let imgUrl = "";
+              if (typeof data.level_image === "string") {
+                  imgUrl = data.level_image;
+              } else if (typeof data.level_image === "object" && data.level_image.url) {
+                  imgUrl = data.level_image.url;
+              }
+              
+              if (imgUrl.startsWith("http")) {
+                  clearInterval(pollInterval);
+                  await loadImageWithRetry(imgUrl);
+              }
+          } catch (err) {
+              console.error("轮询图片失败:", err);
+          }
+      }, 3000); // 每3秒轮询一次
+  }
+
+    async function submitResponse() {
+      const userResponse = document.getElementById("userResponse").value.trim();
+      if (!userResponse) {
+        alert("请输入你的回应！");
+        return;
+      }
+      
+      // 禁用输入框和按钮，显示加载动画
+      const submitBtn = document.getElementById("submitResponseBtn");
+      const userInput = document.getElementById("userResponse");
+      const buttonText = submitBtn.querySelector(".button-text");
+      const loadingSpinner = submitBtn.querySelector(".loading-spinner");
+      
+      submitBtn.disabled = true;
+      userInput.disabled = true;
+      buttonText.style.display = "none";
+      loadingSpinner.style.display = "inline";
+      
+      try {
+        const res = await fetch("/submit_response", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sessionId, user_response: userResponse })
+        });
+        const data = await res.json();
+        
+        // 添加用户回应和系统评价到聊天历史
+        updateChat(`用户：${userResponse}`);
+        updateChat(`系统评价：${data.evaluation_feedback}`);
+        
+        document.getElementById("evaluationFeedback").innerText = data.message;
+        document.getElementById("userResponse").value = "";
+        const aiDialogueElem = document.getElementById("aiDialogue");
+        aiDialogueElem.innerText = "";  // 清空当前的 AI 对话
+        
+        if (data.passed) {
+          // 延时加载下一关卡
+          setTimeout(loadLevel, 1500);
+        } else {
+          // 如果未通过，重新获取 AI 对话
+          aiDialogueElem.innerText = "加载中...";
+          
+          // 启动新的 EventSource 获取流式对话
+          const dialogueSource = new EventSource("/stream_level_dialogue?session_id=" + sessionId);
+          let currentAIResponse = "";
+          let isFirstToken = true;
+          dialogueSource.onmessage = function(event) {
+            if (isFirstToken) {
+              aiDialogueElem.innerText = "";
+              isFirstToken = false;
+            }
+            aiDialogueElem.innerText += event.data;
+            currentAIResponse += event.data;
+          };
+          
+          dialogueSource.onerror = async function(err) {
+            console.error("Dialogue stream error:", err);
+            dialogueSource.close();
+            if (currentAIResponse.trim()) {
+              updateChat(`AI (${document.getElementById("aiRole").innerText}): ${currentAIResponse}`);
+              try {
+                await fetch("/update_chat_history", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ 
+                    session_id: sessionId, 
+                    message: `AI (${document.getElementById("aiRole").innerText}): ${currentAIResponse}`
+                  })
+                });
+
+                // 转换文本为语音并播放
+                const ttsResponse = await fetch("/text_to_speech", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ text: currentAIResponse })
+                });
+                
+                if (ttsResponse.ok) {
+                  const audioUrl = await ttsResponse.text();
+                  console.log("收到的音频数据:", audioUrl.substring(0, 100) + "..."); // 打印前100个字符
+
+                  if (audioUrl && audioUrl !== "语音输出失败") {
+                      const audio = document.getElementById("responseAudio");
+                      audio.src = audioUrl;
+                      try {
+                          // 确保音频元素已经加载
+                          audio.load();
+                          // 添加加载完成事件监听器
+                          audio.oncanplay = async () => {
+                              try {
+                                  console.log("音频已加载，开始播放");
+                                  await audio.play();
+                                  console.log("音频开始播放");
+                              } catch (playError) {
+                                  console.error("播放音频失败:", playError);
+                              }
+                          };
+                          audio.onerror = (e) => {
+                              console.error("音频加载失败:", e);
+                          };
+                      } catch (playError) {
+                          console.error("播放音频失败:", playError);
+                      }
+                  } else {
+                      console.error("无效的音频数据:", audioUrl);
+                  }
+                }
+              } catch (error) {
+                console.error("处理 AI 响应时出错:", error);
+              }
+            }
+            submitBtn.disabled = false;
+            userInput.disabled = false;
+          };
+        }
+      } catch (error) {
+        console.error("提交回应失败:", error);
+        alert("提交回应失败，请重试");
+      } finally {
+        // 恢复按钮和输入框状态
+        submitBtn.disabled = false;
+        userInput.disabled = false;
+        buttonText.style.display = "inline";
+        loadingSpinner.style.display = "none";
+        // 确保按钮文本被正确还原
+        buttonText.textContent = "提交回应";
+      }
+    }
+
+    // 点击提交按钮时提交回应
+    document.getElementById("submitResponseBtn").addEventListener("click", submitResponse);
+    
+    // 在输入框中按回车键时提交回应
+    document.getElementById("userResponse").addEventListener("keypress", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        submitResponse();
+      }
+    });
+
+    // 替换原有的语音控制相关代码
+    let mediaRecorder = null;
+    let audioChunks = [];
+
+    document.getElementById("startVoiceBtn").addEventListener("click", async function() {
+        const button = this;
+        
+        // 如果正在录音，则停止录音
+        if (mediaRecorder && mediaRecorder.state === "recording") {
+            mediaRecorder.stop();
+            button.classList.remove("recording");
+            button.title = "开始语音输入";
+            return;
+        }
+        
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            audioChunks = [];
+            mediaRecorder = new MediaRecorder(stream);
+            
+            mediaRecorder.addEventListener("dataavailable", event => {
+                audioChunks.push(event.data);
+            });
+
+            mediaRecorder.addEventListener("stop", async () => {
+                // 停止所有音轨
+                stream.getTracks().forEach(track => track.stop());
+                
+                const audioBlob = new Blob(audioChunks);
+                const formData = new FormData();
+                formData.append("file", audioBlob, "audio.wav");
+                
+                try {
+                    const response = await fetch("/transcribe_audio", {
+                        method: "POST",
+                        body: formData
+                    });
+                    
+                    if (response.ok) {
+                        const text = await response.text();
+                        document.getElementById("userResponse").value = text;
+                    }
+                } catch (err) {
+                    console.error("转写失败:", err);
+                    alert("语音转写失败");
+                }
+            });
+
+            mediaRecorder.start();
+            button.classList.add("recording");
+            button.title = "点击停止录音";
+            
+        } catch (err) {
+            console.error("语音输入失败:", err);
+            alert("无法访问麦克风");
+        }
+    });
+
+    function updateChat(message) {
+      const chatDiv = document.getElementById("chatHistory");
+      // 使用 pre 标签保持格式，并添加样式
+      const messageElem = document.createElement("pre");
+      messageElem.style.margin = "5px 0";
+      messageElem.style.whiteSpace = "pre-wrap";
+      messageElem.style.wordWrap = "break-word";
+      messageElem.textContent = message;
+      chatDiv.appendChild(messageElem);
+      chatDiv.scrollTop = chatDiv.scrollHeight;
+    }
+
+    // 添加调试面板拖动功能
+    const debugPanel = document.getElementById('debugPanel');
+    const debugTitle = debugPanel.querySelector('h2');
+    let isDragging = false;
+    let isResizing = false;
+    let currentX;
+    let currentY;
+    let initialX;
+    let initialY;
+    let xOffset = 0;
+    let yOffset = 0;
+    let initialWidth;
+    let initialHeight;
+    let resizeDirection = '';
+
+    // 初始化面板位置
+    debugPanel.style.top = '20px';
+    debugPanel.style.left = '20px';
+
+    // 初始化拖动功能
+    function initDragAndResize() {
+        // 拖动开始
+        function dragStart(e) {
+            if (debugPanel.classList.contains('minimized')) return;
+            
+            const target = e.target;
+            
+            // 检查是否点击了调整大小的把手
+            if (target.classList.contains('resize-handle')) {
+                isResizing = true;
+                initialWidth = debugPanel.offsetWidth;
+                initialHeight = debugPanel.offsetHeight;
+                resizeDirection = target.classList.contains('right') ? 'right' : 
+                                target.classList.contains('bottom') ? 'bottom' : 'both';
+            }
+            // 只有点击标题栏才能移动
+            else if (target === debugTitle || target.parentElement === debugTitle) {
+                isDragging = true;
+            }
+            
+            if (e.type === "touchstart") {
+                initialX = e.touches[0].clientX - xOffset;
+                initialY = e.touches[0].clientY - yOffset;
+            } else {
+                initialX = e.clientX - xOffset;
+                initialY = e.clientY - yOffset;
+            }
+        }
+
+        // 拖动/调整大小结束
+        function dragEnd() {
+            isDragging = false;
+            isResizing = false;
+        }
+
+        // 处理移动和调整大小
+        function drag(e) {
+            if (debugPanel.classList.contains('minimized')) return;
+            
+            let clientX, clientY;
+            if (e.type === "touchmove") {
+                clientX = e.touches[0].clientX;
+                clientY = e.touches[0].clientY;
+            } else {
+                clientX = e.clientX;
+                clientY = e.clientY;
+            }
+
+            if (isDragging) {
+                e.preventDefault();
+                currentX = clientX - initialX;
+                currentY = clientY - initialY;
+                xOffset = currentX;
+                yOffset = currentY;
+
+                // 确保面板不会被拖出视窗
+                const maxX = window.innerWidth - debugPanel.offsetWidth;
+                const maxY = window.innerHeight - debugPanel.offsetHeight;
+                currentX = Math.min(Math.max(currentX, 0), maxX);
+                currentY = Math.min(Math.max(currentY, 0), maxY);
+
+                debugPanel.style.transform = `translate(${currentX}px, ${currentY}px)`;
+            }
+            else if (isResizing) {
+                e.preventDefault();
+                const dx = clientX - initialX;
+                const dy = clientY - initialY;
+                
+                // 根据调整方向设置新的尺寸
+                if (resizeDirection === 'right' || resizeDirection === 'both') {
+                    const newWidth = Math.max(300, initialWidth + dx);
+                    debugPanel.style.width = `${newWidth}px`;
+                }
+                if (resizeDirection === 'bottom' || resizeDirection === 'both') {
+                    const newHeight = Math.max(200, initialHeight + dy);
+                    debugPanel.style.height = `${newHeight}px`;
+                }
+            }
+        }
+
+        // 添加事件监听器
+        debugPanel.addEventListener("mousedown", dragStart);
+        document.addEventListener("mousemove", drag);
+        document.addEventListener("mouseup", dragEnd);
+        debugPanel.addEventListener("touchstart", dragStart);
+        document.addEventListener("touchmove", drag);
+        document.addEventListener("touchend", dragEnd);
+    }
+
+    // 初始化调试面板
+    initDragAndResize();
+    debugPanel.style.transform = 'translate(20px, 20px)';
+    debugPanel.style.display = 'block';
+    debugPanel.classList.remove('section');
+    debugPanel.style.width = '500px';
+    debugPanel.style.height = '300px';
+
+    // 修改最小化按钮处理函数
+    document.getElementById('toggleDebug').addEventListener('click', function(e) {
+        e.stopPropagation(); // 防止触发拖动
+        
+        const isMinimized = debugPanel.classList.toggle('minimized');
+        this.textContent = isMinimized ? '□' : '_';
+        
+        // 最小化状态管理
+        if (isMinimized) {
+            debugPanel.style.resize = 'none';
+            isDragging = false; // 强制停止任何正在进行的拖动
+        } else {
+            debugPanel.style.resize = 'both';
+            debugPanel.style.height = '300px'; // 恢复默认高度
+        }
+    });
+
+    // 初始化调试面板
+    debugPanel.style.transform = 'translate(20px, 20px)';  // 初始位置
+    debugPanel.style.display = 'block';  // 确保显示
+    debugPanel.classList.remove('section');  // 移除可能影响显示的类
+    
+    // 设置初始大小
+    debugPanel.style.width = '500px';
+    debugPanel.style.height = '300px';
+
+    // 添加提示切换功能
+    function toggleHints() {
+        const hintsContent = document.getElementById('hintsContent');
+        const toggleIcon = document.querySelector('.toggle-icon');
+        hintsContent.classList.toggle('expanded');
+        toggleIcon.textContent = hintsContent.classList.contains('expanded') ? '▼' : '▶';
+    }
+  </script>
+</body>
+</html>
